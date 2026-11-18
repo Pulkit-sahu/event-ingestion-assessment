@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Event counter</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      font: 16px/1.45 system-ui, sans-serif;
+      background: #f4f1ea;
+      color: #1c1915;
+    }
+    main { max-width: 880px; margin: 0 auto; padding: 28px 20px 64px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    h2 { margin: 0 0 8px; font-size: 18px; }
+    .lead { margin: 0 0 18px; max-width: 62ch; }
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin: 0 0 22px;
+      padding: 0;
+      list-style: none;
+    }
+    .steps li {
+      background: #fff;
+      border: 1px solid #ddd4c6;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 14px;
+    }
+    .steps b { display: block; margin-bottom: 4px; }
+    section {
+      background: #fff;
+      border: 1px solid #ddd4c6;
+      border-radius: 10px;
+      padding: 16px;
+      margin: 0 0 14px;
+    }
+    label { display: block; font-size: 13px; margin-bottom: 8px; }
+    input, select {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 4px;
+      padding: 7px 8px;
+      border: 1px solid #cfc6b8;
+      border-radius: 6px;
+      font: inherit;
+    }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    button {
+      border: 0;
+      background: #243024;
+      color: #fff;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.secondary { background: #5c5346; }
+    pre, .note {
+      background: #f7f4ee;
+      border-radius: 6px;
+      padding: 10px;
+      margin: 0;
+      white-space: pre-wrap;
+      font-size: 13px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 10px; }
+    th, td { text-align: left; border-bottom: 1px solid #eee6da; padding: 6px 4px; vertical-align: top; }
+    .pills { display: flex; gap: 8px; margin-bottom: 14px; }
+    .pill { font-size: 13px; background: #fff; border: 1px solid #ddd4c6; border-radius: 99px; padding: 4px 10px; }
+    .empty { color: #6d6458; font-size: 14px; }
+    @media (max-width: 720px) {
+      .steps, .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Event counter</h1>
+    <p class="lead">A customer sends an activity event. This service stores it once, even if it arrives again, then a separate job counts how many landed in each minute or hour.</p>
+    <div class="pills">
+      <span class="pill" id="health-pill">health …</span>
+      <span class="pill" id="ready-pill">database …</span>
+    </div>
+    <ol class="steps">
+      <li><b>1. Save</b> The event is stored under its id.</li>
+      <li><b>2. Repeat</b> The same id does not create a second row.</li>
+      <li><b>3. Count</b> The worker adds it to a time bucket.</li>
+      <li><b>4. Read</b> Counts come from those buckets.</li>
+    </ol>
+
+    <section>
+      <h2>Send an event</h2>
+      <div class="grid">
+        <label>Event id <input id="event-id"></label>
+        <label>Tenant <input id="tenant-id" value="acme"></label>
+        <label>Source <input id="source" value="web"></label>
+        <label>Type <input id="event-type" value="click"></label>
+        <label>Time (UTC) <input id="timestamp"></label>
+        <label>Page in the payload <input id="path" value="/pricing"></label>
+      </div>
+      <div class="buttons">
+        <button id="save" type="button">Save event</button>
+        <button id="save-again" class="secondary" type="button">Save the same event again</button>
+        <button id="save-conflict" class="secondary" type="button">Save same id, different page</button>
+      </div>
+      <pre id="result">Nothing sent yet. The first save should say created. The second should say duplicate.</pre>
+    </section>
+
+    <section>
+      <h2>Stored events</h2>
+      <p class="empty">One row per event id for this tenant. A duplicate save does not add a row.</p>
+      <div id="events"></div>
+    </section>
+
+    <section>
+      <h2>Turn stored events into counts</h2>
+      <p class="empty">This button is the background worker. The count table stays empty until it runs. Running it again does not double the numbers.</p>
+      <div class="buttons">
+        <button id="run-worker" type="button">Run the counter</button>
+        <label style="margin:0; min-width: 140px;">Bucket
+          <select id="bucket">
+            <option value="minute">minute</option>
+            <option value="hour">hour</option>
+          </select>
+        </label>
+      </div>
+      <pre id="worker-result">Counts have not been updated yet.</pre>
+      <div id="metrics"></div>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const stamp = new Date(Date.now() - 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    $("timestamp").value = stamp;
+    $("event-id").value = "evt-" + stamp.slice(11, 19).replace(/:/g, "");
+
+    function payload(path) {
+      return {
+        event_id: $("event-id").value.trim(),
+        tenant_id: $("tenant-id").value.trim(),
+        source: $("source").value.trim(),
+        event_type: $("event-type").value.trim(),
+        timestamp: $("timestamp").value.trim(),
+        payload: { path }
+      };
+    }
+
+    async function send(path) {
+      const response = await fetch("/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload(path))
+      });
+      const body = await response.json();
+      $("result").textContent = response.status + " " + JSON.stringify(body, null, 2);
+      await loadEvents();
+    }
+
+    function table(rows, columns) {
+      if (!rows.length) return '<p class="empty">Nothing here yet.</p>';
+      const head = columns.map((column) => `<th>${column.label}</th>`).join("");
+      const body = rows.map((row) => `<tr>${columns.map((column) => `<td>${column.value(row)}</td>`).join("")}</tr>`).join("");
+      return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    }
+
+    async function loadEvents() {
+      const tenant = encodeURIComponent($("tenant-id").value.trim() || "acme");
+      const response = await fetch(`/events?tenant_id=${tenant}&limit=20`);
+      const body = await response.json();
+      const items = body.items || [];
+      $("events").innerHTML = table(items, [
+        { label: "id", value: (row) => row.event_id },
+        { label: "source", value: (row) => row.source },
+        { label: "type", value: (row) => row.event_type },
+        { label: "time", value: (row) => row.timestamp },
+        { label: "payload", value: (row) => JSON.stringify(row.payload) }
+      ]);
+    }
+
+    function windowAroundEvent() {
+      const when = new Date($("timestamp").value);
+      const center = Number.isNaN(when.getTime()) ? new Date() : when;
+      const from = new Date(center.getTime() - 60 * 60 * 1000);
+      const to = new Date(center.getTime() + 60 * 60 * 1000);
+      const iso = (value) => value.toISOString().replace(/\.\d{3}Z$/, "Z");
+      return { from: iso(from), to: iso(to) };
+    }
+
+    async function loadMetrics() {
+      const tenant = encodeURIComponent($("tenant-id").value.trim() || "acme");
+      const bucket = $("bucket").value;
+      const span = windowAroundEvent();
+      const response = await fetch(`/metrics?tenant_id=${tenant}&bucket=${bucket}&group_by=source,event_type&from=${encodeURIComponent(span.from)}&to=${encodeURIComponent(span.to)}`);
+      const body = await response.json();
+      if (!response.ok) {
+        $("metrics").innerHTML = `<p class="empty">${body.message || "Could not load counts."}</p>`;
+        return;
+      }
+      $("metrics").innerHTML = table(body.buckets || [], [
+        { label: "bucket", value: (row) => row.bucket_start },
+        { label: "source", value: (row) => row.source || "—" },
+        { label: "type", value: (row) => row.event_type || "—" },
+        { label: "count", value: (row) => row.count }
+      ]);
+    }
+
+    $("save").addEventListener("click", () => send($("path").value.trim() || "/pricing"));
+    $("save-again").addEventListener("click", () => send($("path").value.trim() || "/pricing"));
+    $("save-conflict").addEventListener("click", () => send("/other"));
+    $("bucket").addEventListener("change", loadMetrics);
+    $("run-worker").addEventListener("click", async () => {
+      const response = await fetch("/worker/once", { method: "POST" });
+      const body = await response.json();
+      $("worker-result").textContent = response.ok
+        ? `Worker folded ${body.processed} new event(s) into buckets.`
+        : JSON.stringify(body);
+      await loadMetrics();
+    });
+
+    fetch("/health").then((response) => response.json()).then((body) => {
+      $("health-pill").textContent = "health " + body.status;
+    });
+    fetch("/ready").then((response) => response.json()).then((body) => {
+      $("ready-pill").textContent = "database " + body.database;
+    });
+    loadEvents();
+    loadMetrics();
+  </script>
+</body>
+</html>
